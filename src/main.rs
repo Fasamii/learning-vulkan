@@ -16,6 +16,8 @@ struct GraphicsApp<'a> {
     physical_device: vk::PhysicalDevice,
     queue: vk::Queue,
     device_props: vk::PhysicalDeviceProperties2<'a>,
+
+    buffer_created: bool,
 }
 
 impl GraphicsApp<'_> {
@@ -107,22 +109,89 @@ impl GraphicsApp<'_> {
             physical_device,
             queue,
             device_props,
+
+            buffer_created: false,
         })
     }
 
-    fn destroy(self) {
+    fn new_buffer(&self, size: u64) -> (vk::Buffer, vk::DeviceMemory) {
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe {
+            self.device
+                .create_buffer(&buffer_info, None)
+                .expect("info failed for buffer")
+        };
+        let mem_req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let mem_props = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
+        };
+        let memory_type_index = (0..mem_props.memory_type_count)
+            .find(|&index| {
+                let memory_type = mem_props.memory_types[index as usize];
+                (mem_req.memory_type_bits & (1 << index)) != 0
+                    && memory_type
+                        .property_flags
+                        .contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+            })
+            .expect("failed to find suitable memory");
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_req.size)
+            .memory_type_index(memory_type_index);
+        let buffer_memory = unsafe {
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .expect("failed to allof memory")
+        };
+        unsafe {
+            self.device
+                .bind_buffer_memory(buffer, buffer_memory, 0)
+                .expect("failed to bind memory")
+        }
+
+        let data_to_wire = [1.0f32, 2.0, 4.0, 3.0];
+        let data_ptr = unsafe {
+            self.device
+                .map_memory(buffer_memory, 0, size, vk::MemoryMapFlags::empty())
+                .expect("failed to make data_ptr")
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data_to_wire.as_ptr() as *const u8,
+                data_ptr as *mut u8,
+                std::mem::size_of_val(&data_to_wire),
+            );
+        }
+        // unmap (end)
+        unsafe {
+            self.device.unmap_memory(buffer_memory);
+        }
+        (buffer, buffer_memory)
+    }
+
+    fn destroy(self, buffer: Option<vk::Buffer>, mem: Option<vk::DeviceMemory>) {
+        if self.buffer_created {
+            unsafe { self.device.destroy_buffer(buffer.unwrap(), None) }
+            unsafe { self.device.free_memory(mem.unwrap(), None) }
+        }
         unsafe { self.device.destroy_device(None) };
         unsafe { self.instance.destroy_instance(None) };
     }
 }
 
 fn main() {
-    let app = match GraphicsApp::new() {
+    let mut app = match GraphicsApp::new() {
         Ok(app) => app,
         Err(err) => {
             panic!("[!] Failed to initialize vulkan :: {err}")
         }
     };
 
-    app.destroy();
+    let (buffer, mem) = app.new_buffer(32);
+    app.buffer_created = true;
+
+    app.destroy(Some(buffer), Some(mem));
 }
